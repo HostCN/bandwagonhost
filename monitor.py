@@ -28,7 +28,7 @@ MAX_RETRIES = int(os.getenv('MAX_RETRIES', 1))      # 最大重试次数
 TIMEOUT = int(os.getenv('TIMEOUT', 30))             # 请求超时时间（秒）
 BASE_URL = "https://bwh81.net"                      # 站点的基础 URL
 CONFIG_FILE = "/www/wwwroot/bwh/config.json"        # 配置文件路径
-MAX_CONCURRENT_REQUESTS = 2                         # 最大并发请求数
+MAX_CONCURRENT_REQUESTS = 1                         # 最大并发请求数
 
 # 配置翻译字典
 config_translation = {
@@ -402,7 +402,7 @@ async def periodic_task():
         await asyncio.gather(*tasks)
         first_run = False
         logging.info(f"完成一轮监控，当前并发限制: {MAX_CONCURRENT_REQUESTS}")
-        await asyncio.sleep(30)  # 每轮监控间隔 30 秒
+        await asyncio.sleep(60)  # 每轮监控间隔 60 秒
 
 ###############################################################################
 # 主函数
