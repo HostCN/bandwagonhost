@@ -23,12 +23,12 @@ logging.basicConfig(
 
 # 从环境变量中获取配置
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-MAX_RETRIES = int(os.getenv('MAX_RETRIES', 1))      # 最大重试次数
-TIMEOUT = int(os.getenv('TIMEOUT', 30))             # 请求超时时间（秒）
-BASE_URL = "https://bwh81.net"                      # 站点的基础 URL
-CONFIG_FILE = "/www/wwwroot/bwh/config.json"        # 配置文件路径
-MAX_CONCURRENT_REQUESTS = 1                         # 最大并发请求数
+TELEGRAM_CHAT_IDS = os.getenv('TELEGRAM_CHAT_IDS').split(',') if os.getenv('TELEGRAM_CHAT_IDS') else []
+MAX_RETRIES = int(os.getenv('MAX_RETRIES', 1))
+TIMEOUT = int(os.getenv('TIMEOUT', 30))
+BASE_URL = "https://bwh81.net"
+CONFIG_FILE = "/www/wwwroot/bwh/config.json"
+MAX_CONCURRENT_REQUESTS = 1
 
 # 配置翻译字典
 config_translation = {
@@ -103,18 +103,18 @@ class ProductTracker:
         except Exception as e:
             logging.error("保存产品数据到文件失败: " + str(e))
             
-    def update_product(self, key, price, features, link, out_of_stock, message_id=None):
+    def update_product(self, key, price, features, link, out_of_stock, message_ids=None):
         data = {
             "price": price,
             "features": features,
             "link": link,
             "out_of_stock": out_of_stock,
         }
-        if message_id is not None:
-            data["message_id"] = message_id
+        if message_ids is not None:
+            data["message_ids"] = message_ids
         else:
-            if key in self.inventory and "message_id" in self.inventory[key]:
-                data["message_id"] = self.inventory[key]["message_id"]
+            if key in self.inventory and "message_ids" in self.inventory[key]:
+                data["message_ids"] = self.inventory[key]["message_ids"]
         self.inventory[key] = data
         self.save_to_file()
         
@@ -142,56 +142,65 @@ def extract_promo_code(soup):
 
 async def send_telegram_message(message):
     bot = telegram.Bot(token=TELEGRAM_TOKEN)
-    retries = 0
-    while retries < MAX_RETRIES:
-        try:
-            sent_message = await bot.send_message(
-                chat_id=TELEGRAM_CHAT_ID,
-                text=message,
-                parse_mode='HTML'
-            )
-            logging.info(f"消息发送成功: {message}")
-            return sent_message
-        except TimedOut:
-            retries += 1
-            logging.warning(f"发送超时，正在重试... {retries}/{MAX_RETRIES}")
-            await asyncio.sleep(2)
-        except Exception as e:
-            logging.error(f"发送消息失败: {e}")
-            break
+    message_ids = {}
+    for chat_id in TELEGRAM_CHAT_IDS:
+        retries = 0
+        while retries < MAX_RETRIES:
+            try:
+                sent_message = await bot.send_message(
+                    chat_id=chat_id,
+                    text=message,
+                    parse_mode='HTML'
+                )
+                message_ids[chat_id] = sent_message.message_id
+                logging.info(f"消息发送成功到 {chat_id}: {message[:50]}...")
+                break
+            except TimedOut:
+                retries += 1
+                logging.warning(f"发送到 {chat_id} 超时，正在重试... {retries}/{MAX_RETRIES}")
+                await asyncio.sleep(2)
+            except Exception as e:
+                logging.error(f"发送消息到 {chat_id} 失败: {e}")
+                break
+        await asyncio.sleep(0.5)
+    return message_ids if message_ids else None
 
 async def edit_or_skip_message(existing_product_key, new_message):
     bot = telegram.Bot(token=TELEGRAM_TOKEN)
     existing_product = product_tracker.get_product(existing_product_key)
-    if not existing_product or "message_id" not in existing_product:
-        logging.info("没有找到有效的 message_id，跳过编辑操作")
+    if not existing_product or "message_ids" not in existing_product:
+        logging.info("没有找到有效的 message_ids，跳过编辑操作")
         return
-    message_id = existing_product["message_id"]
-    try:
-        await bot.edit_message_text(
-            chat_id=TELEGRAM_CHAT_ID,
-            message_id=message_id,
-            text=new_message,
-            parse_mode='HTML'
-        )
-        logging.info("编辑消息成功")
-    except telegram.error.BadRequest as e:
-        if "Message is not modified" in str(e):
-            logging.info("消息内容未更改，跳过编辑操作")
-        elif "Message_id_invalid" in str(e):
-            logging.error("消息已被删除或不存在")
-            product_tracker.update_product(
-                existing_product_key,
-                existing_product['price'],
-                existing_product['features'],
-                existing_product['link'],
-                existing_product['out_of_stock'],
-                message_id=None
+    
+    for chat_id, message_id in existing_product["message_ids"].items():
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=new_message,
+                parse_mode='HTML'
             )
-        else:
-            logging.error(f"编辑消息失败: {e}")
-    except Exception as e:
-        logging.error(f"编辑消息失败: {e}")
+            logging.info(f"编辑消息成功在 {chat_id}")
+        except telegram.error.BadRequest as e:
+            if "Message is not modified" in str(e):
+                logging.info(f"消息内容未更改，跳过编辑操作在 {chat_id}")
+            elif "Message_id_invalid" in str(e):
+                logging.error(f"消息已被删除或不存在在 {chat_id}")
+                existing_message_ids = existing_product["message_ids"]
+                existing_message_ids.pop(chat_id, None)
+                product_tracker.update_product(
+                    existing_product_key,
+                    existing_product['price'],
+                    existing_product['features'],
+                    existing_product['link'],
+                    existing_product['out_of_stock'],
+                    message_ids=existing_message_ids
+                )
+            else:
+                logging.error(f"编辑消息失败在 {chat_id}: {e}")
+        except Exception as e:
+            logging.error(f"编辑消息失败在 {chat_id}: {e}")
+        await asyncio.sleep(0.5)
 
 def build_product_message(name, price, features_str, full_link, out_of_stock=False, prefix=None, promo_code=None):
     period_translation = {
@@ -243,7 +252,7 @@ async def fetch_and_parse_products(url, send_notifications=False, semaphore=None
     ssl_context = ssl.create_default_context(cafile=certifi.where())
     async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context)) as session:
         while retries < MAX_RETRIES:
-            async with semaphore:  # 使用信号量限制并发
+            async with semaphore:
                 try:
                     async with session.get(url, timeout=TIMEOUT, allow_redirects=True) as response:
                         if response.status in [400, 401, 403, 404]:
@@ -279,7 +288,7 @@ async def fetch_and_parse_products(url, send_notifications=False, semaphore=None
                 except Exception as e:
                     retries += 1
                     logging.warning(f"请求 {url} 失败（状态码或网络错误: {e}），正在重试... {retries}/{MAX_RETRIES}")
-                    await asyncio.sleep(2 + retries * 2)  # 动态增加重试间隔
+                    await asyncio.sleep(2 + retries * 2)
                     if retries == MAX_RETRIES:
                         logging.error(f"请求 {url} 达到最大重试次数，放弃: {e}")
                         return
@@ -335,8 +344,8 @@ async def fetch_and_parse_products(url, send_notifications=False, semaphore=None
                 return
 
             if send_notifications:
-                sent_message = await send_telegram_message(message)
-                product_tracker.update_product(key, price, features, full_link, out_of_stock, message_id=sent_message.message_id if sent_message else None)
+                message_ids = await send_telegram_message(message)
+                product_tracker.update_product(key, price, features, full_link, out_of_stock, message_ids=message_ids)
             else:
                 product_tracker.update_product(key, price, features, full_link, out_of_stock)
 
@@ -344,9 +353,9 @@ async def fetch_and_parse_products(url, send_notifications=False, semaphore=None
             if existing_product and not existing_product.get('out_of_stock'):
                 logging.info(f"检测到 {name} 已无货，编辑旧消息")
                 message = build_product_message(name, existing_product['price'], existing_product['features'], full_link, out_of_stock=True, promo_code=promo_code)
-                if send_notifications and "message_id" in existing_product and existing_product["message_id"]:
+                if send_notifications and "message_ids" in existing_product and existing_product["message_ids"]:
                     await edit_or_skip_message(key, message)
-                product_tracker.update_product(key, existing_product['price'], existing_product['features'], full_link, out_of_stock, message_id=existing_product.get("message_id"))
+                product_tracker.update_product(key, existing_product['price'], existing_product['features'], full_link, out_of_stock, message_ids=existing_product.get("message_ids"))
             elif not existing_product:
                 product_tracker.update_product(key, price, features, full_link, out_of_stock)
 
@@ -355,7 +364,7 @@ async def fetch_and_parse_products(url, send_notifications=False, semaphore=None
                 existing_product = product_tracker.get_product(key)
                 if not existing_product.get('out_of_stock'):
                     display_name = key.split("::", 1)[1]
-                    if send_notifications and "message_id" in existing_product and existing_product["message_id"]:
+                    if send_notifications and "message_ids" in existing_product and existing_product["message_ids"]:
                         await edit_or_skip_message(
                             key,
                             build_product_message(display_name, existing_product['price'], existing_product['features'], full_link, out_of_stock=True, promo_code=promo_code)
@@ -366,7 +375,7 @@ async def fetch_and_parse_products(url, send_notifications=False, semaphore=None
                         existing_product['features'],
                         full_link,
                         True,
-                        message_id=existing_product.get("message_id")
+                        message_ids=existing_product.get("message_ids")
                     )
 
 ###############################################################################
@@ -376,7 +385,7 @@ async def periodic_task():
     last_mtime = get_config_mtime(CONFIG_FILE)
     monitor_urls = load_config(CONFIG_FILE)
     first_run = True
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)  # 限制并发请求数
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
     while True:
         current_mtime = get_config_mtime(CONFIG_FILE)
@@ -397,12 +406,12 @@ async def periodic_task():
             else:
                 logging.info(f"监控 {url} 商品状态变化")
                 tasks.append(fetch_and_parse_products(url, send_notifications=True, semaphore=semaphore))
-            await asyncio.sleep(random.uniform(0.5, 2))  # 在每个任务间添加随机延迟
+            await asyncio.sleep(random.uniform(0.5, 2))
 
         await asyncio.gather(*tasks)
         first_run = False
         logging.info(f"完成一轮监控，当前并发限制: {MAX_CONCURRENT_REQUESTS}")
-        await asyncio.sleep(60)  # 每轮监控间隔 60 秒
+        await asyncio.sleep(60)
 
 ###############################################################################
 # 主函数
